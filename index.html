@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cropper - Travelist</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #070b14; color: white; margin: 0; padding: 0; }
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #334155; }
+        
+        .crop-viewport-wrapper {
+            position: relative;
+            width: 1040px;
+            height: 563px;
+            overflow: visible;
+        }
+
+        .dimmer-panel {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.47);
+            pointer-events: none;
+            z-index: 20;
+        }
+        .dim-top { top: -2000px; left: -2000px; right: -2000px; height: 2000px; }
+        .dim-bottom { bottom: -2000px; left: -2000px; right: -2000px; height: 2000px; }
+        .dim-left { top: 0; bottom: 0; left: -2000px; width: 2000px; }
+        .dim-right { top: 0; bottom: 0; right: -2000px; width: 2000px; }
+        
+        @keyframes subtle-glow { 0% { box-shadow: 0 0 20px rgba(59,130,246,0.1); } 50% { box-shadow: 0 0 40px rgba(59,130,246,0.3); } 100% { box-shadow: 0 0 20px rgba(59,130,246,0.1); } }
+        .glow-frame { animation: subtle-glow 4s infinite ease-in-out; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useEffect, useCallback } = React;
+
+        const TARGET_WIDTH = 1920;
+        const TARGET_HEIGHT = 1040;
+        const TARGET_RATIO = TARGET_WIDTH / TARGET_HEIGHT;
+        const apiKey = "AIzaSyCAUd7fFDEgE-gDhan-t4pcqFz9fH-ogv0"; 
+        const CURRENT_AI_MODEL = "gemini-3-flash-preview"; 
+
+        function App() {
+            const [images, setImages] = useState([]);
+            const [currentIndex, setCurrentIndex] = useState(null);
+            const [dragMode, setDragMode] = useState(null); 
+            const [dragStart, setDragStart] = useState({ x: 0, y: 0, imgX: 0, imgY: 0, imgScale: 1 });
+            const [isProcessingAI, setIsProcessingAI] = useState(false);
+            const [aiProgress, setAiProgress] = useState(0); 
+            const [aiCount, setAiCount] = useState({ current: 0, total: 0 });
+            const [aiActionType, setAiActionType] = useState("");
+            const [errorMessage, setErrorMessage] = useState("");
+            const [showHelp, setShowHelp] = useState(false);
+            
+            const stopProcessingRef = useRef(false);
+            const containerRef = useRef(null);
+
+            useEffect(() => { if (window.lucide) window.lucide.createIcons(); });
+
+            const checkCoverage = useCallback((imgData) => {
+                if (!imgData) return true;
+                const cw = 1040;
+                const ch = 563;
+                const dw = imgData.width * imgData.scale;
+                const dh = imgData.height * imgData.scale;
+                const left = (cw - dw) / 2 + imgData.x;
+                const top = (ch - dh) / 2 + imgData.y;
+                const right = left + dw;
+                const bottom = top + dh;
+                return left <= 0.5 && top <= 0.5 && right >= cw - 0.5 && bottom >= ch - 0.5;
+            }, []);
+
+            // Zaktualizowana, lżejsza generacja filtrów
+            const getFilterString = (opt) => {
+                if (!opt) return 'none';
+                const temp = opt.temp || 0;
+                const contrast = opt.contrast ?? 1;
+                const vibrance = opt.vibrance ?? 1;
+                const hdr = opt.hdr || 0;
+                const shadows = opt.shadows || 0;
+
+                // Subtelniejsza symulacja HDR i Shadow Lifting (zmniejszone mnożniki)
+                const brightnessBase = 1 + (shadows * 0.15) + (hdr * 0.05);
+                const contrastBase = contrast + (hdr * 0.05);
+                const saturationBase = vibrance + (hdr * 0.1);
+
+                const tint = temp < 0 ? `hue-rotate(${Math.abs(temp) * 10}deg)` : `sepia(${temp * 12}%)`;
+                
+                return `contrast(${contrastBase}) saturate(${saturationBase}) brightness(${brightnessBase}) ${tint}`;
+            };
+
+            const handleFileUpload = async (e) => {
+                const files = Array.from(e.target.files).filter(f => f.type.startsWith('image/'));
+                if (files.length === 0) return;
+
+                const containerWidth = 1040; 
+                const containerHeight = containerWidth / TARGET_RATIO;
+
+                const newImagesPromises = files.map(async (file) => {
+                    const url = URL.createObjectURL(file);
+                    const dims = await new Promise((resolve, reject) => {
+                        const img = new Image();
+                        img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+                        img.onerror = () => reject(new Error("Błąd ładowania pliku: " + file.name));
+                        img.src = url;
+                    });
+                    const scaleW = containerWidth / dims.w;
+                    const scaleH = containerHeight / dims.h;
+                    const initialScale = Math.max(scaleW, scaleH);
+
+                    return {
+                        id: Math.random().toString(36).substr(2, 9),
+                        file, url,
+                        originalName: file.name,
+                        width: dims.w, height: dims.h,
+                        x: 0, y: 0,
+                        scale: initialScale,
+                        optimization: null
+                    };
+                });
+                
+                try {
+                    const resolvedImages = await Promise.all(newImagesPromises);
+                    const validImages = resolvedImages.filter(img => img && img.id);
+                    setImages(prev => [...prev, ...validImages]);
+                    if (currentIndex === null) setCurrentIndex(0);
+                } catch (err) {
+                    setErrorMessage(err.message);
+                }
+                e.target.value = null;
+            };
+
+            const callGeminiAPI = async (prompt, base64Image) => {
+                const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${CURRENT_AI_MODEL}:generateContent?key=${apiKey}`;
+                const payload = {
+                    contents: [{ parts: [{ text: prompt }, { inlineData: { mimeType: "image/png", data: base64Image } }] }],
+                    generationConfig: { responseMimeType: "application/json" }
+                };
+                const res = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                if (!res.ok) throw new Error("Błąd API Google Gemini");
+                const result = await res.json();
+                return result.candidates?.[0]?.content?.parts?.[0]?.text;
+            };
+
+            const autoCropWithAI = async (index) => {
+                const imgData = images[index];
+                if (!imgData) return;
+                try {
+                    const response = await fetch(imgData.url);
+                    const blob = await response.blob();
+                    const base64 = await new Promise(r => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => r(reader.result.split(',')[1]);
+                        reader.readAsDataURL(blob);
+                    });
+                    const prompt = `Analyze this hotel/travel photo. Identify the main subject (bed, window view, facade). Ignore any artificial black or white borders. Return ONLY JSON: {"x": percentage, "y": percentage}.`;
+                    const res = await callGeminiAPI(prompt, base64);
+                    if (stopProcessingRef.current) return;
+                    const focalPoint = JSON.parse(res);
+                    const cw = 1040, ch = 563;
+                    const dw = imgData.width * imgData.scale, dh = imgData.height * imgData.scale;
+                    const maxX = (dw - cw) / 2, maxY = (dh - ch) / 2;
+                    const finalX = Math.max(-maxX, Math.min(maxX, -(focalPoint.x / 100 - 0.5) * dw));
+                    const finalY = Math.max(-maxY, Math.min(maxY, -(focalPoint.y / 100 - 0.5) * dh));
+                    setImages(prev => {
+                        const u = [...prev];
+                        if (u[index]) u[index] = { ...u[index], x: finalX, y: finalY };
+                        return u;
+                    });
+                } catch (e) { console.error(e); }
+            };
+
+            const optimizeWithAI = async (index) => {
+                const imgData = images[index];
+                if (!imgData) return;
+                try {
+                    const response = await fetch(imgData.url);
+                    const blob = await response.blob();
+                    const base64 = await new Promise(r => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => r(reader.result.split(',')[1]);
+                        reader.readAsDataURL(blob);
+                    });
+                    // Zmodyfikowany prompt nakazujący AI zachowanie ostrożności przy dobrych zdjęciach
+                    const prompt = `Analyze travel photo quality. Assess existing dynamic range, exposure and color balance. If the image is already high quality and professional, return neutral values (0 for offsets, 1 for multipliers). Otherwise, suggest very subtle adjustments for a natural look. Return ONLY JSON: {"temp": float (-0.1 to 0.1), "contrast": float (0.98 to 1.1), "vibrance": float (1.0 to 1.15), "sharpness": float (0 to 0.3), "hdr": float (0 to 0.25), "shadows": float (0 to 0.25)}.`;
+                    const res = await callGeminiAPI(prompt, base64);
+                    if (stopProcessingRef.current) return;
+                    const params = JSON.parse(res);
+                    setImages(prev => {
+                        const u = [...prev];
+                        if (u[index]) u[index] = { ...u[index], optimization: params };
+                        return u;
+                    });
+                } catch (e) { console.error(e); }
+            };
+
+            const handleAIAction = async (type) => {
+                if (images.length === 0 || isProcessingAI) return;
+                setIsProcessingAI(true);
+                stopProcessingRef.current = false;
+                setAiActionType(type === 'crop' ? 'Kadr AI' : 'Optymalizacja AI');
+                
+                for (let i = 0; i < images.length; i++) {
+                    if (stopProcessingRef.current) break;
+                    
+                    if (type === 'crop') await autoCropWithAI(i);
+                    else await optimizeWithAI(i);
+                    
+                    setAiProgress(Math.round(((i + 1) / images.length) * 100));
+                    setAiCount({ current: i + 1, total: images.length });
+                }
+                
+                setIsProcessingAI(false);
+                setAiActionType("");
+                stopProcessingRef.current = false;
+            };
+
+            const stopAI = () => {
+                stopProcessingRef.current = true;
+            };
+
+            const updateScale = (d) => {
+                setImages(prev => prev.map((img, idx) => 
+                    idx === currentIndex ? { ...img, scale: Math.max(0.01, img.scale + d) } : img
+                ));
+            };
+
+            useEffect(() => {
+                const handleKey = (e) => {
+                    if (currentIndex === null || document.activeElement.tagName === 'INPUT') return;
+                    const step = 8;
+                    if (e.key === 'ArrowLeft') setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, x: img.x - step } : img));
+                    if (e.key === 'ArrowRight') setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, x: img.x + step } : img));
+                    if (e.key === 'ArrowUp') setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, y: img.y - step } : img));
+                    if (e.key === 'ArrowDown') setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, y: img.y + step } : img));
+                    if (e.key === ' ') {
+                        e.preventDefault();
+                        if (currentIndex < images.length - 1) setCurrentIndex(currentIndex + 1);
+                    }
+                };
+                window.addEventListener('keydown', handleKey);
+                return () => window.removeEventListener('keydown', handleKey);
+            }, [currentIndex, images.length]);
+
+            const removeImage = (id, e) => {
+                e.stopPropagation();
+                const u = images.filter(img => img && img.id !== id);
+                setImages(u);
+                if (u.length === 0) setCurrentIndex(null);
+                else if (currentIndex >= u.length) setCurrentIndex(u.length - 1);
+            };
+
+            const processImageBlob = async (imgData) => {
+                const canvas = document.createElement('canvas');
+                const img = new Image();
+                img.src = imgData.url;
+                await new Promise(r => img.onload = r);
+                canvas.width = TARGET_WIDTH;
+                canvas.height = TARGET_HEIGHT;
+                const ctx = canvas.getContext('2d');
+                const previewScale = TARGET_WIDTH / 1040;
+                const dw = imgData.width * imgData.scale * previewScale;
+                const dh = imgData.height * imgData.scale * previewScale;
+                const dx = (TARGET_WIDTH - dw) / 2 + (imgData.x * previewScale);
+                const dy = (TARGET_HEIGHT - dh) / 2 + (imgData.y * previewScale);
+                
+                if (imgData.optimization) {
+                    ctx.filter = getFilterString(imgData.optimization);
+                }
+                
+                ctx.fillStyle = '#000'; ctx.fillRect(0, 0, TARGET_WIDTH, TARGET_HEIGHT);
+                ctx.drawImage(img, dx, dy, dw, dh);
+                return new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.94));
+            };
+
+            const saveAll = async (toFolder = false) => {
+                let dir = null;
+                if (toFolder) dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+                for (const img of images) {
+                    if (!img) continue;
+                    const blob = await processImageBlob(img);
+                    const name = `${img.originalName.split('.')[0]}-cropped.jpg`;
+                    if (toFolder && dir) {
+                        const h = await dir.getFileHandle(name, { create: true });
+                        const w = await h.createWritable();
+                        await w.write(blob); await w.close();
+                    } else {
+                        const l = document.createElement('a');
+                        l.download = name; l.href = URL.createObjectURL(blob); l.click();
+                        await new Promise(r => setTimeout(r, 600));
+                    }
+                }
+            };
+
+            const handleMouseDown = (e, mode) => {
+                if (currentIndex === null || !images[currentIndex]) return;
+                setDragMode(mode);
+                setDragStart({ x: e.clientX, y: e.clientY, imgX: images[currentIndex].x, imgY: images[currentIndex].y, imgScale: images[currentIndex].scale });
+            };
+
+            useEffect(() => {
+                const move = (e) => {
+                    if (!dragMode || currentIndex === null) return;
+                    if (dragMode === 'move') {
+                        setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, x: dragStart.imgX + (e.clientX - dragStart.x), y: dragStart.imgY + (e.clientY - dragStart.y) } : img));
+                    } else if (dragMode.startsWith('resize')) {
+                        const cur = images[currentIndex];
+                        const d = dragMode === 'resize-br' ? Math.max(e.clientX - dragStart.x, e.clientY - dragStart.y) : -Math.max(e.clientX - dragStart.x, e.clientY - dragStart.y);
+                        setImages(prev => prev.map((img, idx) => idx === currentIndex ? { ...img, scale: Math.max(0.001, dragStart.imgScale + (d / cur.width)) } : img));
+                    }
+                };
+                const up = () => setDragMode(null);
+                window.addEventListener('mousemove', move);
+                window.addEventListener('mouseup', up);
+                return () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+            }, [dragMode, currentIndex, dragStart, images]);
+
+            const currentIsCovered = checkCoverage(images[currentIndex]);
+
+            return (
+                <div className="h-screen flex flex-col overflow-hidden relative">
+                    {isProcessingAI && (
+                        <div className="absolute top-16 left-0 w-full h-10 bg-[#0d1425] border-b border-indigo-500/30 z-[60] flex items-center px-6 shadow-2xl gap-4">
+                            <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative">
+                                <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${aiProgress}%` }}></div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-white">{aiActionType}: {aiCount.current}/{aiCount.total}</span>
+                                <button 
+                                    onClick={stopAI}
+                                    className="bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase px-3 py-1 rounded-lg flex items-center gap-1 transition-colors shadow-lg"
+                                >
+                                    <i data-lucide="square" className="w-3 h-3 fill-current"></i> STOP
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                    
+                    <header className="h-16 px-6 bg-[#0d1425] border-b border-white/5 flex items-center justify-between shadow-xl z-50">
+                        <div className="flex items-center gap-6">
+                            <div className="flex flex-col">
+                                <span className="text-2xl font-black italic uppercase leading-none tracking-tighter text-white">Cropper</span>
+                                <span className="text-[10px] font-black text-blue-400 uppercase opacity-80">by Travelist</span>
+                            </div>
+                            <div className="flex gap-2">
+                                <label className="cursor-pointer bg-white/5 p-2 rounded-lg text-[10px] font-black uppercase border border-white/10 flex gap-2 items-center hover:bg-white/10 transition-all text-white">
+                                    <i data-lucide="upload" className="w-3.5 h-3.5"></i> Pliki
+                                    <input type="file" multiple accept="image/*" className="hidden" onChange={handleFileUpload} />
+                                </label>
+                                <label className="cursor-pointer bg-white/5 p-2 rounded-lg text-[10px] font-black uppercase border border-white/10 flex gap-2 items-center hover:bg-white/10 transition-all text-white">
+                                    <i data-lucide="folder-open" className="w-3.5 h-3.5"></i> Folder
+                                    <input type="file" webkitdirectory="" directory="" className="hidden" onChange={handleFileUpload} />
+                                </label>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <button onClick={() => handleAIAction('crop')} className="bg-indigo-600 p-2.5 rounded-xl text-[10px] font-black uppercase flex gap-2 items-center hover:bg-indigo-500 transition-all text-white shadow-lg shadow-indigo-900/20">
+                                <i data-lucide="sparkles" className="w-3.5 h-3.5"></i> Kadr AI
+                            </button>
+                            <button onClick={() => handleAIAction('optimize')} className="bg-gradient-to-r from-blue-600 to-indigo-600 p-2.5 rounded-xl text-[10px] font-black uppercase flex gap-2 items-center text-white shadow-lg shadow-blue-900/20">
+                                <i data-lucide="wand-2" className="w-3.5 h-3.5"></i> Optymalizacja AI
+                            </button>
+                            <div className="w-[1px] h-6 bg-white/10 mx-1"></div>
+                            <button onClick={() => saveAll(false)} className="bg-slate-800 p-2.5 rounded-xl text-[10px] font-black uppercase flex gap-2 items-center hover:bg-slate-700 transition-all text-white shadow-md">
+                                <i data-lucide="download" className="w-3.5 h-3.5"></i> Zapisz pliki
+                            </button>
+                            <button onClick={() => saveAll(true)} className="bg-slate-800 p-2.5 rounded-xl text-[10px] font-black uppercase flex gap-2 items-center hover:bg-slate-700 transition-all text-white shadow-md">
+                                <i data-lucide="folder-down" className="w-3.5 h-3.5"></i> Zapisz folder
+                            </button>
+                        </div>
+                    </header>
+
+                    <main className="flex-1 flex overflow-hidden">
+                        <div className="w-72 bg-[#0a1120] border-r border-white/5 flex flex-col z-40 shadow-2xl">
+                            <div className="p-4 border-b border-white/5 flex justify-between items-center text-[10px] font-black uppercase text-slate-500 tracking-widest">
+                                <span>Kolejka ({images.length})</span>
+                                {images.length > 0 && <button onClick={() => setImages([])} className="text-red-500 hover:text-red-400 transition-colors">Wyczyść</button>}
+                            </div>
+                            <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
+                                {images.length === 0 ? (
+                                    <div className="h-full flex flex-col items-center justify-center opacity-20 text-center"><i data-lucide="images" className="w-12 h-12 mb-4 text-blue-400"></i><p className="text-xs font-black uppercase tracking-tighter">Wgraj zdjęcia</p></div>
+                                ) : images.filter(img => img).map((img, idx) => (
+                                    <div key={img.id} onClick={() => setCurrentIndex(idx)} className={`group relative p-2 rounded-2xl border-2 transition-all cursor-pointer ${currentIndex === idx ? 'bg-blue-600/10 border-blue-500 scale-[1.02]' : 'bg-slate-900/40 border-transparent hover:bg-slate-800'}`}>
+                                        <button onClick={(e)=>removeImage(img.id, e)} className="absolute -top-1.5 -right-1.5 w-7 h-7 bg-red-600 text-white rounded-full flex items-center justify-center z-10 shadow-xl opacity-0 group-hover:opacity-100 transition-all">
+                                            <i data-lucide="trash-2" className="w-3.5 h-3.5"></i>
+                                        </button>
+                                        <div className="aspect-[192/104] rounded-xl overflow-hidden bg-[#0a1b3d] relative shadow-inner">
+                                            <img src={img.url} className="w-full h-full object-cover" />
+                                            {img.optimization && <div className="absolute bottom-1 right-1 px-1.5 py-0.5 bg-green-500 text-white text-[7px] font-black rounded-md uppercase">AI Ready</div>}
+                                            {!checkCoverage(img) && <div className="absolute bottom-1 left-1 p-0.5 bg-orange-500 rounded-full"><i data-lucide="alert-triangle" className="w-3 h-3 text-white"></i></div>}
+                                        </div>
+                                        <div className="mt-2 px-1 flex flex-col gap-0.5 text-white">
+                                            <p className="text-[9px] font-bold truncate opacity-80">{img.originalName}</p>
+                                            <p className="text-[8px] font-black opacity-40 uppercase tracking-widest">{img.width} × {img.height} px</p>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="flex-1 flex flex-col items-center justify-center relative overflow-hidden bg-[#05080f]">
+                            {images[currentIndex] ? (
+                                <div className="w-full h-full flex flex-col items-center justify-center relative pt-8">
+                                    
+                                    {!currentIsCovered && (
+                                        <div className="absolute top-4 px-4 py-1.5 bg-orange-500/10 border border-orange-500/30 rounded-full flex items-center gap-2 text-orange-500 text-[10px] font-black uppercase tracking-widest animate-pulse z-[60]">
+                                            <i data-lucide="alert-triangle" className="w-3 h-3"></i> Ostrzeżenie: Kadr niepełny
+                                        </div>
+                                    )}
+
+                                    <div className="relative flex items-center justify-center overflow-visible">
+                                        <div ref={containerRef} className="crop-viewport-wrapper" onMouseDown={(e) => handleMouseDown(e, 'move')}>
+                                            
+                                            <div className="dimmer-panel dim-top"></div>
+                                            <div className="dimmer-panel dim-bottom"></div>
+                                            <div className="dimmer-panel dim-left"></div>
+                                            <div className="dimmer-panel dim-right"></div>
+                                            
+                                            <div className="absolute inset-0 border-[4px] border-blue-500/80 rounded-sm z-30 pointer-events-none glow-frame">
+                                                <div className="absolute inset-0 grid grid-cols-3 grid-rows-3 mix-blend-difference opacity-60">
+                                                    {[...Array(9)].map((_, i) => <div key={i} className="border-[1px] border-cyan-400"></div>)}
+                                                </div>
+                                            </div>
+
+                                            <div className="absolute inset-0 flex items-center justify-center">
+                                                <div className="relative" style={{ transform: `translate(${images[currentIndex].x}px, ${images[currentIndex].y}px)` }}>
+                                                    <img src={images[currentIndex].url} 
+                                                         className="max-w-none select-none pointer-events-none opacity-100 transition-[filter] duration-700" 
+                                                         style={{ 
+                                                            width: `${images[currentIndex].width * images[currentIndex].scale}px`, 
+                                                            height: `${images[currentIndex].height * images[currentIndex].scale}px`,
+                                                            filter: getFilterString(images[currentIndex].optimization)
+                                                         }} />
+                                                    <div onMouseDown={(e) => handleMouseDown(e, 'resize-tl')} className="absolute -top-3 -left-3 w-8 h-8 bg-blue-500 rounded-full border-2 border-white cursor-nw-resize z-40 shadow-xl hover:scale-125 transition-transform"></div>
+                                                    <div onMouseDown={(e) => handleMouseDown(e, 'resize-br')} className="absolute -bottom-3 -right-3 w-8 h-8 bg-blue-500 rounded-full border-2 border-white cursor-se-resize z-40 shadow-xl hover:scale-125 transition-transform"></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-12 flex flex-col items-center gap-6 w-full max-w-4xl px-12 z-50 pb-8">
+                                        <div className="flex items-center justify-between w-full backdrop-blur-md bg-[#0d1425]/80 p-4 rounded-3xl border border-white/10 shadow-2xl">
+                                            <div className="flex items-center gap-3 text-white">
+                                                <button onClick={() => updateScale(-0.02)} className="w-12 h-12 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-xl transition-all font-bold text-xl">－</button>
+                                                <div className="px-6 text-[10px] font-black uppercase text-blue-400 border-x border-white/10 tracking-widest text-center whitespace-nowrap">Zoom: {Math.round(images[currentIndex].scale * 100)}%</div>
+                                                <button onClick={() => updateScale(0.02)} className="w-12 h-12 flex items-center justify-center bg-white/5 hover:bg-white/10 rounded-xl transition-all font-bold text-xl">＋</button>
+                                            </div>
+
+                                            <div className="flex items-center gap-10 text-white">
+                                                <button disabled={currentIndex === 0} onClick={() => setCurrentIndex(currentIndex - 1)} className="p-4 rounded-full bg-white/5 hover:bg-blue-600/20 text-white disabled:opacity-20 transition-all border border-white/5">〈</button>
+                                                <div className="text-3xl font-black italic tracking-tighter whitespace-nowrap">{currentIndex + 1} <span className="text-slate-700 mx-1">/</span> {images.length}</div>
+                                                <button disabled={currentIndex === images.length - 1} onClick={() => setCurrentIndex(currentIndex + 1)} className="p-4 rounded-full bg-white/5 hover:bg-blue-600/20 text-white disabled:opacity-20 transition-all border border-white/5">〉</button>
+                                            </div>
+                                        </div>
+
+                                        <div className="flex flex-wrap gap-8 text-[9px] font-black uppercase tracking-widest text-slate-500 py-4 border-t border-white/5 w-full justify-center opacity-60">
+                                            <div className="flex items-center gap-3"><span className="bg-indigo-600 text-white px-2 py-1 rounded shadow-lg">KADR AI</span> <span>Centruje obiekt</span></div>
+                                            <div className="flex items-center gap-3"><span className="bg-blue-600 text-white px-2 py-1 rounded shadow-lg">OPT AI</span> <span>HDR & Cienie</span></div>
+                                            <div className="flex items-center gap-3"><span className="bg-slate-800 text-white px-2 py-1 rounded">STRZAŁKI</span> <span>Przesuwanie</span></div>
+                                            <div className="flex items-center gap-3"><span className="bg-slate-800 text-white px-2 py-1 rounded">SPACJA</span> <span>Następne foto</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="relative w-full h-full flex flex-col items-center justify-center rounded-[3rem] overflow-hidden border border-white/5 bg-[#0a0f1d]">
+                                    <img src="https://images.unsplash.com/photo-1544124499-58912cbddaad?auto=format&fit=crop&w=1920&q=80" className="absolute inset-0 w-full h-full object-cover scale-105" />
+                                    <div className="absolute inset-0 bg-black/40 backdrop-blur-[0.5px]"></div>
+                                    
+                                    <div className="relative z-20 text-center p-12 max-w-sm bg-black/50 rounded-[2.5rem] border border-white/10 shadow-[0_0_100px_rgba(0,0,0,0.5)] backdrop-blur-xl flex flex-col items-center transition-all duration-700">
+                                        <h1 className="text-4xl font-black mb-1 text-white uppercase italic tracking-tighter drop-shadow-2xl">Cropper AI</h1>
+                                        <p className="text-white font-light text-[11px] uppercase tracking-[0.15em] opacity-100 mb-8 leading-relaxed">Inteligentne kadrowanie i optymalizacja zdjęć do galerii hotelowych.</p>
+                                        
+                                        <div className="flex flex-col gap-3 items-center w-full">
+                                            <label className="cursor-pointer bg-blue-600 text-white px-10 py-5 rounded-[2rem] font-black uppercase text-[10px] tracking-[0.2em] hover:bg-blue-500 shadow-2xl flex gap-4 items-center justify-center transition-all active:scale-95 group w-full">
+                                                <i data-lucide="folder-plus" className="w-5 h-5 text-white"></i> Dodaj folder
+                                                <input type="file" webkitdirectory="" directory="" className="hidden" onChange={handleFileUpload}/>
+                                            </label>
+                                            
+                                            <button 
+                                                onClick={() => setShowHelp(!showHelp)}
+                                                className="text-[9px] font-black text-slate-300 uppercase tracking-widest hover:text-white transition-all flex items-center gap-2 mt-1 py-2"
+                                            >
+                                                <i data-lucide={showHelp ? "chevron-up" : "info"} className="w-3 h-3 text-white"></i> 
+                                                Jak działa Cropper?
+                                            </button>
+                                        </div>
+
+                                        {showHelp && (
+                                            <div className="mt-6 text-left bg-black/40 p-6 rounded-2xl border border-white/5 animate-in slide-in-from-bottom-2 duration-500 overflow-y-auto max-h-[220px] custom-scrollbar">
+                                                <div className="space-y-6">
+                                                    <div>
+                                                        <h4 className="text-white font-black text-[9px] uppercase tracking-widest mb-1.5 flex items-center gap-2">
+                                                            <i data-lucide="maximize" className="w-3.5 h-3.5 text-indigo-400"></i> Inteligentne Kadrowanie
+                                                        </h4>
+                                                        <p className="text-slate-200 text-[11px] leading-relaxed font-light">
+                                                            Nasz algorytm AI skanuje obraz w poszukiwaniu głównego tematu (np. łóżko w pokoju hotelowym, fasada budynku czy basen). 
+                                                            Automatycznie wykrywa i ignoruje martwe pola, ustawiając kadr 1920x1040 w optymalnym punkcie skupienia.
+                                                        </p>
+                                                    </div>
+                                                    <div>
+                                                        <h4 className="text-white font-black text-[9px] uppercase tracking-widest mb-1.5 flex items-center gap-2">
+                                                            <i data-lucide="zap" className="w-3.5 h-3.5 text-blue-400"></i> Optymalizacja AI
+                                                        </h4>
+                                                        <div className="space-y-4">
+                                                            <p className="text-slate-200 text-[11px] leading-relaxed font-light text-white">
+                                                                Wykorzystując zaawansowane modele wizyjne, Cropper analizuje każde zdjęcie piksel po pikselu, aby nadać mu profesjonalny wygląd katalogowy:
+                                                            </p>
+                                                            <ul className="text-slate-200 text-[11px] leading-relaxed space-y-2 font-light list-disc pl-4 text-white">
+                                                                <li><strong>Balans bieli:</strong> Zdjęcia hotelowe często cierpią na niepożądane odcienie od lamp. AI neutralizuje je, przywracając naturalną biel pościeli i ścian.</li>
+                                                                <li><strong>Adaptacyjny Kontrast i HDR:</strong> Wyrównuje różnice między jasnymi oknami a ciemnymi kątami pokoju, wyciągając detale z obu obszarów bez "spłaszczania" obrazu.</li>
+                                                                <li><strong>Ratowanie cieni:</strong> Inteligentnie rozjaśnia niedoświetlone fragmenty wnętrz, dbając o czystość obrazu bez wprowadzania szumu.</li>
+                                                                <li><strong>Wibracja kolorów:</strong> Podbija intensywność tylko przygaszonych barw (np. błękit basenu), zachowując naturalny wygląd drewna i skóry.</li>
+                                                                <li><strong>Micro-sharpening:</strong> Subtelne wyostrzanie krawędzi architektury i detali wyposażenia dla lepszego odbioru na ekranach 4K.</li>
+                                                            </ul>
+                                                            <p className="text-slate-300 text-[10px] italic leading-relaxed font-light text-white opacity-60">
+                                                                Kluczowa zasada: "Less is more". Wszystkie poprawki aplikowane są z aptekarską precyzją, by zdjęcie wyglądało na naturalnie i profesjonalnie doświetlone.
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
