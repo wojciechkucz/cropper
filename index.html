@@ -446,13 +446,22 @@
 
                     {/* Progress Bar: AI */}
                     {isProcessingAI && (
-                        <div className="absolute top-16 left-0 w-full h-10 bg-[#0d1425] border-b border-indigo-500/30 z-60 flex items-center px-6 shadow-2xl gap-4">
-                            <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden relative">
-                                <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${aiProgress}%` }}></div>
+                        <div className="absolute top-16 left-0 w-full px-6 py-3 bg-[#0d1425]/90 backdrop-blur-md border-b border-indigo-500/30 flex items-center gap-5 shadow-2xl shadow-indigo-900/30" style={{ zIndex: 60 }}>
+                            <div className="flex items-center gap-2.5 whitespace-nowrap">
+                                <i data-lucide="sparkles" className="w-4 h-4 text-indigo-400 animate-pulse"></i>
+                                <span className="text-[11px] font-black uppercase tracking-widest text-white">{aiActionType}</span>
                             </div>
-                            <div className="flex items-center gap-3 text-white">
-                                <span className="text-[10px] font-black uppercase tracking-widest">{aiActionType}: {aiCount.current}/{aiCount.total}</span>
-                                <button onClick={stopAI} className="bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase px-3 py-1 rounded-lg flex items-center gap-1 transition-colors shadow-lg"><i data-lucide="square" className="w-3 h-3 fill-current text-white"></i> STOP</button>
+                            <div className="flex-1 flex items-center gap-3 min-w-0">
+                                <div className="flex-1 h-2 bg-slate-800/80 rounded-full overflow-hidden relative">
+                                    <div className="h-full bg-gradient-to-r from-blue-500 to-indigo-400 rounded-full transition-all duration-500 ease-out relative" style={{ width: `${aiProgress}%` }}>
+                                        <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+                                    </div>
+                                </div>
+                                <span className="text-[11px] font-black tabular-nums text-indigo-300 whitespace-nowrap">{aiProgress}%</span>
+                            </div>
+                            <div className="flex items-center gap-4 whitespace-nowrap">
+                                <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400"><span className="text-white">{aiCount.current}</span> / {aiCount.total} zdjęć</span>
+                                <button onClick={stopAI} className="bg-red-600 hover:bg-red-500 text-white text-[10px] font-black uppercase px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors shadow-lg"><i data-lucide="square" className="w-3 h-3 fill-current text-white"></i> STOP</button>
                             </div>
                         </div>
                     )}
